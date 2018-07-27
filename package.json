@@ -24,7 +24,7 @@
     "brfs": "^1.2.0",
     "standard": "*",
     "tape": "^4.0.0",
-    "webtorrent-fixtures": "^1.3.0"
+    "webtorrent-fixtures": "1.6.0"
   },
   "keywords": [
     "Extension for Peers to Send Metadata Files",
