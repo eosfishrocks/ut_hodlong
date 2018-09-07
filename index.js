@@ -8,53 +8,46 @@ const MAX_METADATA_SIZE = 1E7 // 10 MB
 const BITFIELD_GROW = 1E3
 const PIECE_LENGTH = 1 << 14 // 16 KiB
 
-module.exports = metadata => {
-  class utMetadata extends EventEmitter {
+module.exports = stats => {
+  class utHodlong extends EventEmitter {
     constructor (wire) {
       super()
 
       this._wire = wire
 
+      this._superpeer = false;
+      try{
+        if(process.env.ENV_VARIABLE["H_SUPERPEER"] !== "TRUE")  this._superpeer = true;
+      }
+      //Do nothing with catch; since this is running in a browser, superpeer will default to false.
+      catch{}
+
+      this._connectedId = {}
       this._fetching = false
-      this._metadataComplete = false
-      this._metadataSize = null
+      this._statsComplete = false
+      this._statSize = null
       // how many reject messages to tolerate before quitting
       this._remainingRejects = null
 
-      // The largest torrent file that I know of is ~1-2MB, which is ~100
-      // pieces. Therefore, cap the bitfield to 10x that (1000 pieces) so a
-      // malicious peer can't make it grow to fill all memory.
-      this._bitfield = new BitField(0, { grow: BITFIELD_GROW })
-
-      if (Buffer.isBuffer(metadata)) {
-        this.setMetadata(metadata)
+      if (Buffer.isBuffer(stats)) {
+        this.setStats(stats, peerid)
       }
     }
 
     onHandshake (infoHash, peerId, extensions) {
-      this._infoHash = infoHash
+      this._connectedId[peerId] = true
+
     }
 
     onExtendedHandshake (handshake) {
-      if (!handshake.m || !handshake.m.ut_metadata) {
-        return this.emit('warning', new Error('Peer does not support ut_metadata'))
+      if (!handshake.m || !handshake.m.ut_hodlong) {
+        return this.emit('warning', new Error('Peer does not support ut_hodlong'))
       }
-      if (!handshake.metadata_size) {
-        return this.emit('warning', new Error('Peer does not have metadata'))
-      }
-      if (typeof handshake.metadata_size !== 'number' ||
-          MAX_METADATA_SIZE < handshake.metadata_size ||
-          handshake.metadata_size <= 0) {
-        return this.emit('warning', new Error('Peer gave invalid metadata size'))
+      if (!handshake.stats) {
+        return this.emit('warning', new Error('Peer does not have any statistics'))
       }
 
-      this._metadataSize = handshake.metadata_size
-      this._numPieces = Math.ceil(this._metadataSize / PIECE_LENGTH)
-      this._remainingRejects = this._numPieces * 2
-
-      if (this._fetching) {
-        this._requestPieces()
-      }
+      this.setStats(handshake.m.ut_hodlong.stats)
     }
 
     onMessage (buf) {
@@ -111,22 +104,17 @@ module.exports = metadata => {
       this._fetching = false
     }
 
-    setMetadata (metadata) {
+    setStats (stats) {
       if (this._metadataComplete) return true
       debug('set metadata')
 
       // if full torrent dictionary was passed in, pull out just `info` key
       try {
-        const info = bencode.decode(metadata).info
+        const info = bencode.decode(stats).info
         if (info) {
-          metadata = bencode.encode(info)
+          stats = bencode.encode(info)
         }
       } catch (err) {}
-
-      // check hash
-      if (this._infoHash && this._infoHash !== sha1.sync(metadata)) {
-        return false
-      }
 
       this.cancel()
 
@@ -147,7 +135,7 @@ module.exports = metadata => {
       if (Buffer.isBuffer(trailer)) {
         buf = Buffer.concat([buf, trailer])
       }
-      this._wire.extended('ut_metadata', buf)
+      this._wire.extended('ut_hodlong', buf)
     }
 
     _request (piece) {
@@ -167,7 +155,7 @@ module.exports = metadata => {
     }
 
     _onRequest (piece) {
-      if (!this._metadataComplete) {
+      if (!this._statComplete) {
         this._reject(piece)
         return
       }
@@ -184,28 +172,33 @@ module.exports = metadata => {
       if (buf.length > PIECE_LENGTH) {
         return
       }
-      buf.copy(this.metadata, piece * PIECE_LENGTH)
-      this._bitfield.set(piece)
+      buf.copy(this.stats, piece * PIECE_LENGTH)
+      this._processData(stats)
       this._checkDone()
     }
 
-    _onReject (piece) {
-      if (this._remainingRejects > 0 && this._fetching) {
-        // If we haven't been rejected too much,
-        // then try to request the piece again
-        this._request(piece)
-        this._remainingRejects -= 1
-      } else {
-        this.emit('warning', new Error('Peer sent "reject" too much'))
+    _processData(stats){
+      if(this.superpeer){
+        this.stats = {...stats, ...this.stats}
       }
+      else{
+        for (let stat in this.stats){
+          if (stat === this.stats){}
+          else {
+            let found = false
+            for (let savedStat in this.stats.key()){
+              if (stat === savedStat){
+                found = true
+                break
+              }
+              else { this.stats[stat] = stats[stat]}
+            }
+          }
+        }
+      }
+      return true
     }
 
-    _requestPieces () {
-      this.metadata = Buffer.alloc(this._metadataSize)
-      for (let piece = 0; piece < this._numPieces; piece++) {
-        this._request(piece)
-      }
-    }
 
     _checkDone () {
       let done = true
@@ -217,14 +210,20 @@ module.exports = metadata => {
       }
       if (!done) return
 
-      // attempt to set metadata -- may fail sha1 check
-      const success = this.setMetadata(this.metadata)
+      // attempt to set statistics -- may fail sha1 check
+      const success = this.setStats(this.stats)
 
       if (!success) {
         this._failedMetadata()
       }
     }
 
+    _requestPieces () {
+      this.stats = Buffer.alloc(this._statSize)
+      for (let piece = 0; piece < this._numPieces; piece++) {
+        this._request(piece)
+      }
+    }
     _failedMetadata () {
       // reset bitfield & try again
       this._bitfield = new BitField(0, { grow: BITFIELD_GROW })
@@ -232,13 +231,13 @@ module.exports = metadata => {
       if (this._remainingRejects > 0) {
         this._requestPieces()
       } else {
-        this.emit('warning', new Error('Peer sent invalid metadata'))
+        this.emit('warning', new Error('Peer sent invalid statistics'))
       }
     }
   }
 
   // Name of the bittorrent-protocol extension
-  utMetadata.prototype.name = 'ut_metadata'
+  utHodlong.prototype.name = 'ut_hodlong'
 
-  return utMetadata
+  return utHodlong
 }
