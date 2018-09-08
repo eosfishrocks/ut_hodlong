@@ -235,7 +235,7 @@ module.exports = stats => {
         this.emit('warning', new Error('Peer sent invalid statistics'))
       }
     }
-    _eosPush (amount) {
+    _eosPush () {
       if (new Date() - this.last_eos_push < 3000) { return }
       else {
         let eos = EOS({
@@ -243,8 +243,9 @@ module.exports = stats => {
           httpEndpoint: this._eosEndpoint,
           chain: this._chain.sys
         })
+        let amount = this._pendingStats[this._remotePeer]
         eos.transaction('hodlong', stats => {
-          stats.addstats(this._eosAccount, this._infoId)
+          stats.addstats(this._eosAccount, this._infoId, this._peerId, this._remotePeerId, amount)
         })
       }
     }
