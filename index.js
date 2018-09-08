@@ -1,18 +1,33 @@
-const { EventEmitter } = require('events')
+const {EventEmitter} = require('events')
 const bencode = require('bencode')
 const BitField = require('bitfield')
 const debug = require('debug')('ut_hodlong')
 const sha1 = require('simple-sha1')
+const EOS = require('eosjs')
 
 const BITFIELD_GROW = 1E3
 const PIECE_LENGTH = 1 << 14 // 16 KiB
 
 module.exports = stats => {
   class utHodlong extends EventEmitter {
-    constructor (wire) {
+    constructor (wire, eosEndpoint, eosAccount, privateKey, chain) {
       super()
 
       this._wire = wire
+
+      if (privateKey == null) return this.emit('error', new Error('No private key passed to constructor'))
+      else this._privateKey = privateKey
+      if (eosEndpoint == null) return this.emit('error', new Error('No eos endpoint passed to constructor'))
+      else this._eosEndpoint = eosEndpoint
+
+      if (chain != null) this._chain = chain
+      else {
+        chain = {
+          main: 'aca376f206b8fc25a6ed44dbdc66547c36c6c33e3a119ffbeaef943642f0e906', // main network
+          jungle: '038f4b0fc8ff18a4f0842a8f0564611f6e96e8535901dd45e43ac8691a1c4dca', // jungle testnet
+          sys: 'cf057bbfb72640471fd910bcb67639c22df9f92470936cddc1ade0e2f2e7dc4f' // local developer
+        }
+      }
 
       this._superpeer = false
       try { if (process.env.ENV_VARIABLE['HODLONG_SUPERPEER'] !== 'TRUE') this._superpeer = true }
@@ -26,11 +41,13 @@ module.exports = stats => {
       this._statsComplete = false
       this._statSize = null
       this._incomingPeerId = null
+      this._bitfield = new BitField(0, { grow: BITFIELD_GROW })
       // how many reject messages to tolerate before quitting
       this._remainingRejects = null
       if (Buffer.isBuffer(stats)) {
         this.setStats(stats)
       }
+      this.peerId = null
     }
 
     onHandshake (infoHash, peerId, extensions) {
@@ -144,7 +161,7 @@ module.exports = stats => {
     }
 
     _data (piece, buf, totalSize) {
-      const msg = { msg_type: 1, piece }
+      const msg = {msg_type: 1, piece}
       if (typeof totalSize === 'number') {
         msg.total_size = totalSize
       }
@@ -152,7 +169,7 @@ module.exports = stats => {
     }
 
     _reject (piece) {
-      this._send({ msg_type: 2, piece })
+      this._send({msg_type: 2, piece})
     }
 
     _onRequest (piece) {
@@ -173,29 +190,14 @@ module.exports = stats => {
       if (buf.length > PIECE_LENGTH) {
         return
       }
-      this._processData(stats)
+      const datasize = piece * PIECE_LENGTH
+      buf.copy(this._pendingStats, datasize)
+      if (this._pendingStats[this.peerId] != null) {
+        this._pendingStats[this.peerId] += datasize
+      }
+      else { this._pendingStats[this.peerId] = datasize }
+      this._bitfield.set(piece)
       this._checkDone()
-    }
-
-    _processData (piece, buf, totalSize) {
-      if (this.superpeer) {
-        this._processedStats = { ...stats, ...this.processedStats }
-      }
-      else {
-        for (let stat in this.stats) {
-          if (stat === this.stats) { }
-          else {
-            let found = false
-            for (let savedStat in this.stats.key()) {
-              if (stat === savedStat) {
-                break
-              }
-              else { this.stats[stat] = stats[stat] }
-            }
-          }
-        }
-      }
-      return true
     }
 
     _checkDone () {
@@ -210,9 +212,9 @@ module.exports = stats => {
 
       // attempt to set statistics -- may fail sha1 check
       const success = this.setStats(this.stats)
-
+      this._eosPush()
       if (!success) {
-        this._failedMetadata()
+        this._failedStats()
       }
     }
 
@@ -223,7 +225,7 @@ module.exports = stats => {
       }
     }
 
-    _failedMetadata () {
+    _failedStats () {
       // reset bitfield & try again
       this._bitfield = new BitField(0, { grow: BITFIELD_GROW })
       this._remainingRejects -= this._numPieces
@@ -233,8 +235,20 @@ module.exports = stats => {
         this.emit('warning', new Error('Peer sent invalid statistics'))
       }
     }
+    _eosPush (amount) {
+      if (new Date() - this.last_eos_push < 3000) { return }
+      else {
+        let eos = EOS({
+          keyProvider: this._privateKey,
+          httpEndpoint: this._eosEndpoint,
+          chain: this._chain.sys
+        })
+        eos.transaction('hodlong', stats => {
+          stats.addstats(this._eosAccount, this._infoId)
+        })
+      }
+    }
   }
-
   // Name of the bittorrent-protocol extension
   utHodlong.prototype.name = 'ut_hodlong'
 
