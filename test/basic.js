@@ -1,34 +1,35 @@
-const { leavesMetadata } = require('webtorrent-fixtures')
+const { leaves } = require('webtorrent-fixtures')
 const bencode = require('bencode')
 const Protocol = require('bittorrent-protocol')
 const test = require('tape')
-const utMetadata = require('../')
+const utHodlong = require('../')
 
-test('wire.use(utMetadata())', t => {
+test('wire.use(utHodlong())', t => {
   const wire = new Protocol()
   wire.pipe(wire)
 
-  wire.use(utMetadata())
+  wire.use(utHodlong())
 
-  t.ok(wire.ut_metadata)
-  t.ok(wire.ut_metadata.fetch)
-  t.ok(wire.ut_metadata.cancel)
-  t.notOk(wire.ut_metadata.metadata)
+  t.ok(wire.ut_hodlong)
+  t.ok(wire.ut_hodlong.fetch)
+  t.ok(wire.ut_hodlong.cancel)
+  t.ok(wire.ut_hodlong.stats)
   t.end()
 })
 
-test('wire.use(utMetadata(metadata))', t => {
+test('wire.use(utHodlong(stats))', t => {
   const wire = new Protocol()
   wire.pipe(wire)
 
-  wire.use(utMetadata(leavesMetadata.torrent))
+  wire.use(utHodlong(leaves.torrent))
 
-  t.ok(wire.ut_metadata)
-  t.ok(wire.ut_metadata.fetch)
-  t.ok(wire.ut_metadata.cancel)
+  t.ok(wire.ut_hodlong)
+  t.ok(wire.ut_hodlong.fetch)
+  t.ok(wire.ut_hodlong.cancel)
+
   t.equal(
-    wire.ut_metadata.metadata.toString('hex'),
-    bencode.encode(bencode.decode(leavesMetadata.torrent).info).toString('hex')
+    wire.ut_hodlong.stats.processedStats,
+    bencode.decode(leaves.torrent).processedStats
   )
   t.end()
 })

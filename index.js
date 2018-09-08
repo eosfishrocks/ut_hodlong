@@ -1,10 +1,9 @@
 const { EventEmitter } = require('events')
 const bencode = require('bencode')
 const BitField = require('bitfield')
-const debug = require('debug')('ut_metadata')
+const debug = require('debug')('ut_hodlong')
 const sha1 = require('simple-sha1')
 
-const MAX_METADATA_SIZE = 1E7 // 10 MB
 const BITFIELD_GROW = 1E3
 const PIECE_LENGTH = 1 << 14 // 16 KiB
 
@@ -15,28 +14,28 @@ module.exports = stats => {
 
       this._wire = wire
 
-      this._superpeer = false;
-      try{
-        if(process.env.ENV_VARIABLE["H_SUPERPEER"] !== "TRUE")  this._superpeer = true;
-      }
-      //Do nothing with catch; since this is running in a browser, superpeer will default to false.
-      catch{}
+      this._superpeer = false
+      try { if (process.env.ENV_VARIABLE['HODLONG_SUPERPEER'] !== 'TRUE') this._superpeer = true }
+      catch (err) {}
 
       this._connectedId = {}
+      this._pendingStats = {}
+      this.stats = {}
+      this._processedStats = {}
       this._fetching = false
       this._statsComplete = false
       this._statSize = null
+      this._incomingPeerId = null
       // how many reject messages to tolerate before quitting
       this._remainingRejects = null
-
       if (Buffer.isBuffer(stats)) {
-        this.setStats(stats, peerid)
+        this.setStats(stats)
       }
     }
 
     onHandshake (infoHash, peerId, extensions) {
       this._connectedId[peerId] = true
-
+      this._incomingPeerId = peerId
     }
 
     onExtendedHandshake (handshake) {
@@ -46,7 +45,9 @@ module.exports = stats => {
       if (!handshake.stats) {
         return this.emit('warning', new Error('Peer does not have any statistics'))
       }
-
+      if (this._incomingPeerId === null) {
+        return this.emit('warning', new Error('Peer does not have incoming id'))
+      }
       this.setStats(handshake.m.ut_hodlong.stats)
     }
 
@@ -65,17 +66,17 @@ module.exports = stats => {
 
       switch (dict.msg_type) {
         case 0:
-          // ut_metadata request (from peer)
+          // ut_hodlong request (from peer)
           // example: { 'msg_type': 0, 'piece': 0 }
           this._onRequest(dict.piece)
           break
         case 1:
-          // ut_metadata data (in response to our request)
+          // ut_hodlong data (in response to our request)
           // example: { 'msg_type': 1, 'piece': 0, 'total_size': 3425 }
           this._onData(dict.piece, trailer, dict.total_size)
           break
         case 2:
-          // ut_metadata reject (peer doesn't have piece we requested)
+          // ut_hodlong reject (peer doesn't have piece we requested)
           // { 'msg_type': 2, 'piece': 0 }
           this._onReject(dict.piece)
           break
@@ -83,21 +84,21 @@ module.exports = stats => {
     }
 
     /**
-     * Ask the peer to send metadata.
+     * Ask the peer to send size.
      * @public
      */
     fetch () {
-      if (this._metadataComplete) {
+      if (this._statsComplete) {
         return
       }
       this._fetching = true
-      if (this._metadataSize) {
+      if (this._statsSize) {
         this._requestPieces()
       }
     }
 
     /**
-     * Stop asking the peer to send metadata.
+     * Stop asking the peer to send stats.
      * @public
      */
     cancel () {
@@ -105,8 +106,8 @@ module.exports = stats => {
     }
 
     setStats (stats) {
-      if (this._metadataComplete) return true
-      debug('set metadata')
+      if (this._statsComplete) return true
+      debug('set stats')
 
       // if full torrent dictionary was passed in, pull out just `info` key
       try {
@@ -118,13 +119,13 @@ module.exports = stats => {
 
       this.cancel()
 
-      this.metadata = metadata
-      this._metadataComplete = true
-      this._metadataSize = this.metadata.length
-      this._wire.extendedHandshake.metadata_size = this._metadataSize
+      this._pendingStats = stats
+      this._statsComplete = true
+      this._statSize = Object.keys(this.stats).length
+      this._wire.extendedHandshake.stats_size = this._statsSize
 
-      this.emit('metadata', bencode.encode({
-        info: bencode.decode(this.metadata)
+      this.emit('stats', bencode.encode({
+        info: bencode.decode(this.size)
       }))
 
       return true
@@ -161,44 +162,41 @@ module.exports = stats => {
       }
       const start = piece * PIECE_LENGTH
       let end = start + PIECE_LENGTH
-      if (end > this._metadataSize) {
-        end = this._metadataSize
+      if (end > this._statsSize) {
+        end = this._statsSize
       }
-      const buf = this.metadata.slice(start, end)
-      this._data(piece, buf, this._metadataSize)
+      const buf = this.size.slice(start, end)
+      this._data(piece, buf, this._statsSize)
     }
 
     _onData (piece, buf, totalSize) {
       if (buf.length > PIECE_LENGTH) {
         return
       }
-      buf.copy(this.stats, piece * PIECE_LENGTH)
       this._processData(stats)
       this._checkDone()
     }
 
-    _processData(stats){
-      if(this.superpeer){
-        this.stats = {...stats, ...this.stats}
+    _processData (piece, buf, totalSize) {
+      if (this.superpeer) {
+        this._processedStats = { ...stats, ...this.processedStats }
       }
-      else{
-        for (let stat in this.stats){
-          if (stat === this.stats){}
+      else {
+        for (let stat in this.stats) {
+          if (stat === this.stats) { }
           else {
             let found = false
-            for (let savedStat in this.stats.key()){
-              if (stat === savedStat){
-                found = true
+            for (let savedStat in this.stats.key()) {
+              if (stat === savedStat) {
                 break
               }
-              else { this.stats[stat] = stats[stat]}
+              else { this.stats[stat] = stats[stat] }
             }
           }
         }
       }
       return true
     }
-
 
     _checkDone () {
       let done = true
@@ -224,6 +222,7 @@ module.exports = stats => {
         this._request(piece)
       }
     }
+
     _failedMetadata () {
       // reset bitfield & try again
       this._bitfield = new BitField(0, { grow: BITFIELD_GROW })
